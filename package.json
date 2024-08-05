@@ -1,0 +1,32 @@
+{
+  "name": "chat-server",
+  "version": "1.0.0",
+  "description": "Chat application backend server",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "chat-server",
+    "Back-end"
+  ],
+  "author": "Tariq Rasheed",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.7.2",
+    "cloudinary": "^2.3.1",
+    "colors": "^1.4.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "mongoose": "^8.5.1",
+    "multer": "^1.4.5-lts.1",
+    "socket.io": "^4.7.5",
+    "winston": "^3.13.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  }
+}
