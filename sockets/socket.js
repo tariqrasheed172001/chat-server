@@ -6,6 +6,7 @@ const Conversation = require("../models/Conversation");
 const Ticket = require("../models/Ticket");
 const errorLogger = require("../logger/errorLogger");
 const infoLogger = require("../logger/infoLogger");
+const successLogger = require("../logger/successLogger");
 
 const rooms = new Set();
 const agents = new Set();
@@ -31,39 +32,37 @@ const setupSocketIO = (server) => {
       });
     });
 
-    socket.on("join", () => {
-      const currentRoom = customerRooms.get(socket.id);
-
-      if (currentRoom) {
-        // If the customer is already in a room, rejoin them to their current room
-        socket.join(currentRoom);
-        socket.emit("assignedRoom", currentRoom);
-        console.log(`Customer rejoined room: ${currentRoom}`);
-      } else {
-        // Assign a new room if the customer is not in any room
-        let room;
-        do {
-          room = `ticket-${Math.floor(Math.random() * 10000)}`;
-        } while (rooms.has(room));
-        rooms.add(room);
-        socket.join(room);
-        customerRooms.set(socket.id, room);
-        socket.emit("assignedRoom", room);
-        console.log(`Customer joined room: ${room}`);
-
-        // Notify agents about the new room
-        agents.forEach((agentId) => {
-          io.to(agentId).emit("newRoom", room);
-          io.to(agentId).socketsJoin(room); // Ensure the agent joins the new room
-        });
-
-        socket.to(room).emit("message", {
-          sender: "System",
-          message: `${socket.id} has joined the room`,
-          room,
-        });
+    socket.on("join", (roomIds) => {
+      if (!Array.isArray(roomIds)) {
+        console.error("Expected roomIds to be an array");
+        return;
       }
+    
+      // Join each room only if the socket is not already in that room
+      roomIds.forEach(roomId => {
+        if (!socket.rooms.has(roomId)) {
+          socket.join(roomId);
+          console.log(`Socket ${socket.id} joined room: ${roomId}`);
+    
+          // Notify agents about the new room
+          agents.forEach((agentId) => {
+            io.to(agentId).emit("newRoom", roomId);
+            io.to(agentId).socketsJoin(roomId); // Ensure the agent joins the new room
+          });
+    
+          // // Optionally, emit a message to the room that a new socket has joined
+          // socket.to(roomId).emit("message", {
+          //   sender: "System",
+          //   message: `${socket.id} has joined the room`,
+          //   room: roomId,
+          // });
+        }
+      });
+    
+      // Optionally, send a confirmation to the client with the rooms joined
+      socket.emit("assignedRooms", roomIds);
     });
+    
 
     socket.on("createRoom", async (roomId, ticketId, customerId, callback) => {
       console.log("Creating new room with ID:", roomId);
@@ -94,8 +93,9 @@ const setupSocketIO = (server) => {
         customerRooms.set(socket.id, roomId);
 
         // Create a new conversation in the database
+        let newConversation;
         try {
-          const newConversation = new Conversation({
+          newConversation = new Conversation({
             roomId: roomId, // Use roomId directly as a string
             ticketId: new mongoose.Types.ObjectId(ticketId),
             customerId: new mongoose.Types.ObjectId(customerId),
@@ -129,17 +129,20 @@ const setupSocketIO = (server) => {
           });
         }
 
+        const conversation = await Conversation.findById(newConversation._id)
+          .populate("ticketId")
+          .populate("messages");
+
         callback({
           success: true,
-          roomId,
-          ticketDetails,
+          conversation,
         });
 
         console.log(`Customer joined room: ${roomId}`);
 
         // Notify agents about the new room
         agents.forEach((agentId) => {
-          io.to(agentId).emit("newRoom", roomId);
+          io.to(agentId).emit("newConversation", conversation);
           io.to(agentId).socketsJoin(roomId); // Ensure the agent joins the new room
         });
 
@@ -180,6 +183,18 @@ const setupSocketIO = (server) => {
     socket.on("message", async (data) => {
       console.log(`Message received in room ${data.room}: ${data.message}`);
 
+      const roomExists = (roomId) => {
+        return io.sockets.adapter.rooms.has(roomId);
+      };
+
+      if (roomExists(data.room)) {
+        console.log(`Room ${data.room} exists. Joining room.`);
+      } else {
+        console.log(`Room ${data.room} does not exist. Creating and joining room.`);
+      }
+
+      // socket.join(data.room);
+
       let attachmentUrl = null;
 
       // Check if there's an attachment and upload it
@@ -208,6 +223,8 @@ const setupSocketIO = (server) => {
         timestamp: Date.now(),
       };
 
+      io.to(data.room).emit("message", messageData);
+
       try {
         // Save the message
         const message = new Message(messageData);
@@ -220,7 +237,7 @@ const setupSocketIO = (server) => {
         );
 
         // Emit the message to the room
-        io.to(data.room).emit("message", message);
+        // io.to(data.room).emit("message", message);
       } catch (error) {
         errorLogger.error(
           "Error saving message or updating conversation:",
@@ -229,6 +246,132 @@ const setupSocketIO = (server) => {
       }
     });
 
+    socket.on("assignUserToConversation", async (data, callback) => {
+      infoLogger.info(
+        `Assigning user to conversation. User ID: ${data.userId}, Conversation ID: ${data.conversationId}`
+      );
+
+      // Validate input
+      if (
+        !mongoose.Types.ObjectId.isValid(data.userId) ||
+        !mongoose.Types.ObjectId.isValid(data.conversationId)
+      ) {
+        errorLogger.error(
+          "Invalid input types. userId and conversationId must be valid ObjectId strings."
+        );
+        return (
+          callback &&
+          callback({
+            success: false,
+            message:
+              "Invalid input types. userId and conversationId must be valid ObjectId strings.",
+          })
+        );
+      }
+
+      try {
+        // Find the conversation and update the userId
+        const updatedConversation = await Conversation.findByIdAndUpdate(
+          data.conversationId,
+          { userId: new mongoose.Types.ObjectId(data.userId) },
+          { new: true } // Return the updated document
+        ).lean();
+
+        if (!updatedConversation) {
+          throw new Error("Conversation not found");
+        }
+
+        successLogger.http(
+          `User assigned to conversation. Conversation ID: ${data.conversationId}, User ID: ${data.userId}`
+        );
+
+        // Optionally, notify the client or agents about the update
+        io.to(socket.id).emit(
+          "userAssignedToConversation",
+          updatedConversation
+        );
+
+        // Send a success response
+        callback({
+          success: true,
+          message: "User assigned to conversation successfully",
+          conversation: updatedConversation,
+        });
+      } catch (error) {
+        errorLogger.error("Error assigning user to conversation:", error);
+        callback({
+          success: false,
+          message: "Error assigning user to conversation",
+          error: error.message,
+        });
+      }
+    });
+
+    socket.on("unassignUserFromConversation", async (data, callback) => {
+      infoLogger.info(
+        `Unassigning user from conversation. User ID: ${data.userId}, Conversation ID: ${data.conversationId}`
+      );
+    
+      // Validate input
+      if (
+        !mongoose.Types.ObjectId.isValid(data.userId) ||
+        !mongoose.Types.ObjectId.isValid(data.conversationId)
+      ) {
+        errorLogger.error(
+          "Invalid input types. userId and conversationId must be valid ObjectId strings."
+        );
+        return (
+          callback &&
+          callback({
+            success: false,
+            message:
+              "Invalid input types. userId and conversationId must be valid ObjectId strings.",
+          })
+        );
+      }
+    
+      try {
+        // Find the conversation and update the userId to null
+        const updatedConversation = await Conversation.findByIdAndUpdate(
+          data.conversationId,
+          { userId: null },
+          { new: true } // Return the updated document
+        ).lean();
+    
+        if (!updatedConversation) {
+          throw new Error("Conversation not found");
+        }
+    
+        successLogger.http(
+          `User unassigned from conversation. Conversation ID: ${data.conversationId}, User ID: ${data.userId}`
+        );
+
+        const conversation = await Conversation.findById(updatedConversation._id)
+        .populate("ticketId")
+        .populate("messages");
+    
+        // Optionally, notify the client or agents about the update
+        io.to(socket.id).emit(
+          "userUnassignedFromConversation",
+          conversation
+        );
+    
+        // Send a success response
+        callback({
+          success: true,
+          message: "User unassigned from conversation successfully",
+          conversation: conversation,
+        });
+      } catch (error) {
+        errorLogger.error("Error unassigning user from conversation:", error);
+        callback({
+          success: false,
+          message: "Error unassigning user from conversation",
+          error: error.message,
+        });
+      }
+    });
+    
     socket.on("updateTicketStatus", async (data, callback) => {
       console.log(
         `Updating ticket status. Ticket ID: ${data.ticketId}, Status: ${data.status}`
@@ -269,7 +412,11 @@ const setupSocketIO = (server) => {
         );
 
         // Optionally, notify the client or agents about the update
-        io.to(agents).emit("ticketStatusUpdated", updatedTicket);
+        const ticketDetails = {
+          roomId: data.roomId,
+          status: data.status,
+        }
+        io.to(data.roomId).emit("ticketStatusUpdated", ticketDetails);
 
         // Send a success response
         callback({
@@ -289,7 +436,7 @@ const setupSocketIO = (server) => {
 
     socket.on("closeTicket", async (data, callback) => {
       console.log(`Closing ticket. Ticket ID: ${data.ticketId}`);
-    
+
       // Validate the input
       if (typeof data.ticketId !== "string") {
         console.error("Invalid input type. ticketId must be a string.");
@@ -301,7 +448,7 @@ const setupSocketIO = (server) => {
           })
         );
       }
-    
+
       try {
         // Find the conversation by ticketId and update feedback
         const updatedConversation = await Conversation.findOneAndUpdate(
@@ -315,27 +462,31 @@ const setupSocketIO = (server) => {
           },
           { new: true }
         ).lean();
-    
+
         if (!updatedConversation) {
           throw new Error("Conversation not found");
         }
-    
+
         // Update the ticket status to "Closed"
         const updatedTicket = await Ticket.findByIdAndUpdate(
           data.ticketId,
           { status: "closed" },
           { new: true } // Return the updated document
         ).lean();
-    
+
         if (!updatedTicket) {
           throw new Error("Ticket not found");
         }
-    
+
         console.log(`Ticket closed. Ticket ID: ${data.ticketId}`);
-    
+
         // Optionally, notify the client or agents about the update
-        io.to(agents).emit("ticketClosed", updatedTicket);
-    
+        const ticketDetails = {
+          roomId: data.roomId,
+          status: 'closed',
+        }
+        io.to(data.roomId).emit("ticketClosed", ticketDetails);
+
         // Send a success response
         callback({
           success: true,
@@ -352,7 +503,6 @@ const setupSocketIO = (server) => {
         });
       }
     });
-    
 
     socket.on("disconnect", () => {
       console.log("User disconnected");

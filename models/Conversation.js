@@ -15,14 +15,13 @@ const conversationSchema = new Schema({
   },
   customerId: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'Customer',  // Reference to the User model for customer details
+    ref: 'Customer',  // Reference to the Customer model for customer details
     required: true,
   },
-  // userId: {
-  //   type: mongoose.Schema.Types.ObjectId,
-  //   ref: 'User',  // Reference to the User model for agent details
-  //   required: true,
-  // },
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',  // Reference to the User model for agent details
+  },
   messages: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Message',  // Reference to the Message model
